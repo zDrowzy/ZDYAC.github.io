@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZDYAC — Dashboard</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="../config.js"></script>
+<style>
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    height: calc(100vh - 57px);
+  }
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: 1fr; }
+    .players { display: none; }
+    .players.open { display: block; }
+  }
+
+  .players {
+    border-right: 1px solid var(--line);
+    background: var(--panel);
+    overflow-y: auto;
+  }
+  .players h2, .feed-header h2 {
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 400;
+    padding: 14px 16px 8px;
+    margin: 0;
+  }
+  .player-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+  }
+  .player-row:hover { background: rgba(255,255,255,0.03); }
+  .player-row.active { border-left-color: var(--brand); background: rgba(45,212,232,0.06); }
+  .player-name { color: var(--text); }
+  .player-count { color: var(--dim); font-size: 11px; }
+
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+  .feed-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--line);
+  }
+  .feed-header .actions { padding-right: 16px; display: flex; gap: 8px; }
+
+  .feed {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 16px 40px;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 90px 130px 110px 50px 90px 1fr;
+    gap: 10px;
+    align-items: center;
+    padding: 9px 6px;
+    border-bottom: 1px solid var(--line);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+  }
+  .row .time { color: var(--dim); }
+  .row .player { color: var(--text); font-weight: 500; }
+  .row .details { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .empty {
+    color: var(--dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    padding: 40px 16px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <div class="radar"></div>
+    ZDYAC <small>// consola de escaneo</small>
+  </div>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <span id="userEmail" class="mono" style="color:var(--dim); font-size:12px;"></span>
+    <button id="logoutBtn">Salir</button>
+  </div>
+</div>
+
+<div class="layout">
+  <aside class="players">
+    <h2>JUGADORES VISTOS</h2>
+    <div class="player-row" data-uuid="" style="border-left-color: var(--brand);">
+      <span class="player-name">Todos (feed global)</span>
+    </div>
+    <div id="playerList"></div>
+  </aside>
+
+  <section class="main">
+    <div class="feed-header">
+      <h2 id="feedTitle">FEED GLOBAL EN TIEMPO REAL</h2>
+      <div class="actions">
+        <button id="freezeBtn" class="danger" style="display:none;">Freeze jugador</button>
+      </div>
+    </div>
+    <div class="feed" id="feed">
+      <div class="empty">Esperando detecciones…</div>
+    </div>
+  </section>
+</div>
+
+<script>
+  const supabase = window.supabase.createClient(
+    window.ZDYAC_CONFIG.SUPABASE_URL,
+    window.ZDYAC_CONFIG.SUPABASE_ANON_KEY
+  );
+
+  let selectedUuid = null;
+  const players = new Map(); // uuid -> { name, count, lastConfidence }
+  const feedEl = document.getElementById("feed");
+  const playerListEl = document.getElementById("playerList");
+  const feedTitleEl = document.getElementById("feedTitle");
+  const freezeBtn = document.getElementById("freezeBtn");
+
+  // ---------- Auth guard ----------
+  async function requireSession() {
+    const { data } = await supabase.auth.getSession();
+    if (!data.session) {
+      window.location.href = "../login.html";
+      return null;
+    }
+    document.getElementById("userEmail").textContent = data.session.user.email;
+    return data.session;
+  }
+
+  document.getElementById("logoutBtn").addEventListener("click", async () => {
+    await supabase.auth.signOut();
+    window.location.href = "../login.html";
+  });
+
+  // ---------- Render ----------
+  function formatTime(ts) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function renderPlayers() {
+    playerListEl.innerHTML = "";
+    for (const [uuid, p] of [...players.entries()].sort((a, b) => b[1].count - a[1].count)) {
+      const row = document.createElement("div");
+      row.className = "player-row" + (uuid === selectedUuid ? " active" : "");
+      row.dataset.uuid = uuid;
+      row.innerHTML = `
+        <span class="player-name">${p.name}</span>
+        <span style="display:flex; align-items:center; gap:6px;">
+          <span class="badge ${p.lastConfidence}">${p.lastConfidence}</span>
+          <span class="player-count">${p.count}</span>
+        </span>`;
+      row.addEventListener("click", () => selectPlayer(uuid, p.name));
+      playerListEl.appendChild(row);
+    }
+  }
+
+  function selectPlayer(uuid, name) {
+    selectedUuid = uuid || null;
+    feedTitleEl.textContent = uuid ? `DETECCIONES DE ${name.toUpperCase()}` : "FEED GLOBAL EN TIEMPO REAL";
+    freezeBtn.style.display = uuid ? "inline-block" : "none";
+    freezeBtn.dataset.uuid = uuid || "";
+    document.querySelectorAll(".player-row").forEach(r => {
+      r.classList.toggle("active", r.dataset.uuid === (uuid || ""));
+    });
+    reloadFeed();
+  }
+
+  document.querySelector('.player-row[data-uuid=""]').addEventListener("click", () => selectPlayer(null, ""));
+
+  function addRow(det, prepend = true) {
+    if (feedEl.querySelector(".empty")) feedEl.innerHTML = "";
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <span class="time">${formatTime(det.created_at)}</span>
+      <span class="player">${det.player_name}</span>
+      <span>${det.check_name}</span>
+      <span>VL ${det.violation_level}</span>
+      <span class="badge ${det.confidence}">${det.confidence}</span>
+      <span class="details">${det.raw_data || ""}</span>`;
+
+    if (prepend) feedEl.prepend(row); else feedEl.appendChild(row);
+  }
+
+  function trackPlayer(det) {
+    const existing = players.get(det.player_uuid) || { name: det.player_name, count: 0, lastConfidence: "Legit" };
+    existing.name = det.player_name;
+    existing.count += 1;
+    existing.lastConfidence = det.confidence;
+    players.set(det.player_uuid, existing);
+    renderPlayers();
+  }
+
+  // ---------- Carga inicial + realtime ----------
+  async function reloadFeed() {
+    feedEl.innerHTML = "";
+    let query = supabase.from("detections").select("*").order("created_at", { ascending: false }).limit(80);
+    if (selectedUuid) query = query.eq("player_uuid", selectedUuid);
+
+    const { data, error } = await query;
+    if (error) {
+      feedEl.innerHTML = `<div class="empty">Error cargando feed: ${error.message}</div>`;
+      return;
+    }
+    if (!data.length) {
+      feedEl.innerHTML = `<div class="empty">Sin detecciones todavía.</div>`;
+      return;
+    }
+    data.forEach(det => addRow(det, false));
+  }
+
+  async function loadPlayerSummary() {
+    const { data, error } = await supabase
+      .from("detections")
+      .select("player_uuid, player_name, confidence, created_at")
+      .order("created_at", { ascending: true })
+      .limit(1000);
+    if (error || !data) return;
+    data.forEach(trackPlayer);
+  }
+
+  freezeBtn.addEventListener("click", async () => {
+    const uuid = freezeBtn.dataset.uuid;
+    if (!uuid) return;
+    const { data: sessionData } = await supabase.auth.getSession();
+    const { error } = await supabase.from("freeze_requests").insert({
+      player_uuid: uuid,
+      requested_by: sessionData.session.user.id
+    });
+    if (error) {
+      alert("No se pudo enviar el freeze: " + error.message);
+    } else {
+      freezeBtn.textContent = "Freeze enviado ✓";
+      setTimeout(() => (freezeBtn.textContent = "Freeze jugador"), 2000);
+    }
+  });
+
+  async function init() {
+    const session = await requireSession();
+    if (!session) return;
+
+    await loadPlayerSummary();
+    await reloadFeed();
+
+    // Suscripción en tiempo real a nuevas detecciones
+    supabase
+      .channel("detections-feed")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "detections" }, (payload) => {
+        const det = payload.new;
+        trackPlayer(det);
+        if (!selectedUuid || selectedUuid === det.player_uuid) {
+          addRow(det, true);
+        }
+      })
+      .subscribe();
+  }
+
+  init();
+</script>
+</body>
+</html>
