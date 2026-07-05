@@ -1,1 +1,0 @@
-# ZDYAC.github.io
